@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>CubeHell Online</title>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    canvas { display: block; }
+    #ui {
+      position: absolute;
+      top: 10px; left: 10px;
+      background: rgba(0,0,0,0.5);
+      padding: 10px;
+      color: white;
+      z-index: 10;
+    }
+  </style>
+</head>
+<body>
+<div id="ui">
+  <input id="email" placeholder="email"><br>
+  <input id="pass" placeholder="password" type="password"><br>
+  <button onclick="login()">Login</button>
+  <div id="status"></div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.1/examples/js/controls/PointerLockControls.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.6.11/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.6.11/firebase-database-compat.js"></script>
+<script src="https://download.playfab.com/PlayFabClientApi.js"></script>
+<script>
+  // Firebase config
+  const firebaseConfig = {
+    apiKey: "AIzaSyAwOkSkCwX4xDiSoUaV_7UjHHBo7MczepA",
+    authDomain: "chat-gpt-8f366.firebaseapp.com",
+    projectId: "chat-gpt-8f366",
+    storageBucket: "chat-gpt-8f366.appspot.com",
+    messagingSenderId: "127763764298",
+    appId: "1:127763764298:web:bd1caa8178cb4cdbb082b3",
+    measurementId: "G-VWK7CY4NEC",
+    databaseURL: "https://chat-gpt-8f366-default-rtdb.firebaseio.com"
+  };
+  firebase.initializeApp(firebaseConfig);
+  const db = firebase.database();
+
+  // PlayFab setup
+  const playFabTitleId = "80127";
+  let userId = "";
+
+  function login() {
+    const email = document.getElementById("email").value;
+    const pass = document.getElementById("pass").value;
+    PlayFabClientSDK.LoginWithEmailAddress({
+      TitleId: playFabTitleId,
+      Email: email,
+      Password: pass
+    }, res => {
+      if (res.data) {
+        userId = res.data.PlayFabId;
+        document.getElementById("ui").style.display = "none";
+        initWorld();
+        document.getElementById("status").innerText = "Logged in!";
+      }
+    }, err => {
+      if (err.error === "AccountNotFound") {
+        PlayFabClientSDK.RegisterPlayFabUser({
+          TitleId: playFabTitleId,
+          Email: email,
+          Password: pass,
+          RequireBothUsernameAndEmail: false
+        }, regRes => {
+          userId = regRes.data.PlayFabId;
+          document.getElementById("ui").style.display = "none";
+          initWorld();
+        }, console.error);
+      } else {
+        document.getElementById("status").innerText = err.errorMessage;
+      }
+    });
+  }
+
+  let scene, camera, renderer, controls;
+  let blocks = {}, players = {};
+  const size = 10, cubeSize = 1;
+
+  function initWorld() {
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+    renderer = new THREE.WebGLRenderer();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    controls = new THREE.PointerLockControls(camera, renderer.domElement);
+    document.body.addEventListener('click', () => controls.lock());
+    scene.add(controls.getObject());
+
+    const light = new THREE.DirectionalLight(0xffffff, 1);
+    light.position.set(10, 20, 10);
+    scene.add(light);
+
+    camera.position.set(0, 2, 5);
+
+    const geometry = new THREE.BoxGeometry(cubeSize, cubeSize, cubeSize);
+    const material = new THREE.MeshLambertMaterial({ color: 0x55ff55 });
+
+    for (let x = -size; x <= size; x++) {
+      for (let z = -size; z <= size; z++) {
+        const cube = new THREE.Mesh(geometry, material.clone());
+        cube.position.set(x, 0, z);
+        scene.add(cube);
+        blocks[`${x},0,${z}`] = cube;
+      }
+    }
+
+    animate();
+    setupInput();
+    syncPosition();
+    listenForPlayers();
+    listenForBlocks();
+  }
+
+  function setupInput() {
+    const keys = {};
+    document.addEventListener('keydown', e => keys[e.code] = true);
+    document.addEventListener('keyup', e => keys[e.code] = false);
+
+    let prevTime = performance.now();
+    function movementLoop() {
+      const time = performance.now();
+      const delta = (time - prevTime) / 1000;
+      prevTime = time;
+
+      const speed = 5;
+      if (keys['KeyW']) controls.moveForward(speed * delta);
+      if (keys['KeyS']) controls.moveForward(-speed * delta);
+      if (keys['KeyA']) controls.moveRight(-speed * delta);
+      if (keys['KeyD']) controls.moveRight(speed * delta);
+
+      setTimeout(movementLoop, 10);
+    }
+    movementLoop();
+
+    document.addEventListener('mousedown', e => {
+      const dir = new THREE.Vector3();
+      camera.getWorldDirection(dir);
+      const ray = new THREE.Raycaster(camera.position, dir);
+      const intersects = ray.intersectObjects(Object.values(blocks));
+      if (intersects.length > 0) {
+        const block = intersects[0].object;
+        const key = `${block.position.x},${block.position.y},${block.position.z}`;
+        if (e.button === 0) {
+          scene.remove(block);
+          delete blocks[key];
+          db.ref("blocks/" + key).remove();
+        } else if (e.button === 2) {
+          const pos = block.position.clone().add(intersects[0].face.normal);
+          const newBlock = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshLambertMaterial({ color: 0x9999ff }));
+          newBlock.position.copy(pos).round();
+          const bkey = `${newBlock.position.x},${newBlock.position.y},${newBlock.position.z}`;
+          if (!blocks[bkey]) {
+            scene.add(newBlock);
+            blocks[bkey] = newBlock;
+            db.ref("blocks/" + bkey).set(true);
+          }
+        }
+      }
+    });
+  }
+
+  function animate() {
+    requestAnimationFrame(animate);
+    renderer.render(scene, camera);
+  }
+
+  function syncPosition() {
+    setInterval(() => {
+      const pos = controls.getObject().position;
+      db.ref("players/" + userId).set({ x: pos.x, y: pos.y, z: pos.z });
+    }, 100);
+  }
+
+  function listenForPlayers() {
+    db.ref("players").on("value", snap => {
+      const all = snap.val() || {};
+      for (let id in all) {
+        if (id === userId) continue;
+        if (!players[id]) {
+          const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 2, 1), new THREE.MeshLambertMaterial({ color: 0xff0000 }));
+          scene.add(mesh);
+          players[id] = mesh;
+        }
+        players[id].position.set(all[id].x, all[id].y, all[id].z);
+      }
+    });
+  }
+
+  function listenForBlocks() {
+    db.ref("blocks").on("child_added", snap => {
+      const key = snap.key;
+      if (!blocks[key]) {
+        const [x, y, z] = key.split(',').map(Number);
+        const mesh = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshLambertMaterial({ color: 0x9999ff }));
+        mesh.position.set(x, y, z);
+        scene.add(mesh);
+        blocks[key] = mesh;
+      }
+    });
+    db.ref("blocks").on("child_removed", snap => {
+      const key = snap.key;
+      const mesh = blocks[key];
+      if (mesh) {
+        scene.remove(mesh);
+        delete blocks[key];
+      }
+    });
+  }
+</script>
+</body>
+</html>
